@@ -50,3 +50,23 @@ app.post("/acs/inbound", async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+
+// Connectivity smoke test: just open & close AOAI Realtime WS
+app.get("/test-realtime", async (_req, res) => {
+  try {
+    const url =
+      `${process.env.AZURE_OPENAI_ENDPOINT}/openai/realtime` +
+      `?api-version=${encodeURIComponent(process.env.AZURE_OPENAI_API_VERSION)}` +
+      `&deployment=${encodeURIComponent(process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT)}`;
+
+    const ws = new (await import("ws")).default(url, {
+      headers: { "api-key": process.env.AZURE_OPENAI_API_KEY, "OpenAI-Beta": "realtime=v1" }
+    });
+
+    ws.on("open", () => { console.log("✅ Realtime WS OK"); ws.close(); res.send("Realtime WS OK"); });
+    ws.on("error", (e) => { console.error("Realtime WS error:", e); if (!res.headersSent) res.status(500).send(String(e)); });
+  } catch (e) {
+    console.error(e);
+    if (!_req.res?.headersSent) res.status(500).send(String(e));
+  }
+});
