@@ -72,60 +72,90 @@ app.get("/env-check", (_req, res) => {
 });
 
 // Connectivity smoke test for Azure OpenAI Realtime Audio WS
+// Connectivity probe for Azure OpenAI Realtime – tries common variants and reports results.
 app.get("/test-realtime", async (_req, res) => {
-  try {
-    const endpoint = process.env.AZURE_OPENAI_ENDPOINT;            // e.g. https://service-desk-voice-agent.openai.azure.com/
-    const apiVersion = process.env.AZURE_OPENAI_API_VERSION;       // e.g. 2025-08-28
-    const deployment = process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT; // e.g. gpt-realtime
-    const apiKey = process.env.AZURE_OPENAI_API_KEY;
+  const endpoint   = (process.env.AZURE_OPENAI_ENDPOINT || "").replace(/\/+$/,""); // no trailing slash
+  const apiKey     = process.env.AZURE_OPENAI_API_KEY;
+  const deployment = process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT || "gpt-realtime";
 
-    if (!endpoint || !apiVersion || !deployment) {
-      return res.status(500).send(
-        "Missing one of: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REALTIME_DEPLOYMENT"
-      );
-    }
-    if (!apiKey) {
-      return res.status(500).send("Missing AZURE_OPENAI_API_KEY");
-    }
+  if (!endpoint || !apiKey || !deployment) {
+    return res.status(500).send(
+      "Missing one of: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_REALTIME_DEPLOYMENT"
+    );
+  }
 
-    const wssBase = wsBaseFromHttp(endpoint);
-    // NOTE: `/audio` is required for Realtime **Audio**
-    const wsUrl = `${wssBase}/openai/realtime/audio?api-version=${encodeURIComponent(apiVersion)}&deployment=${encodeURIComponent(deployment)}`;
+  // Most common API versions seen in Realtime docs/UI
+  const apiVersions = [
+    process.env.AZURE_OPENAI_API_VERSION || "2025-08-28",
+    "2024-10-21-preview"
+  ];
 
-    const ws = new WebSocket(wsUrl, {
-      headers: {
-        "api-key": apiKey,
-        "OpenAI-Beta": "realtime=v1",
-      },
+  // Common URL patterns (Azure sometimes varies between /realtime and /realtime/audio; deployment vs deploymentId)
+  const pathVariants = [
+    (ver, dep) => `${endpoint.replace(/^http/i,"ws")}/openai/realtime?api-version=${encodeURIComponent(ver)}&deployment=${encodeURIComponent(dep)}`,
+    (ver, dep) => `${endpoint.replace(/^http/i,"ws")}/openai/realtime?api-version=${encodeURIComponent(ver)}&deploymentId=${encodeURIComponent(dep)}`,
+    (ver, dep) => `${endpoint.replace(/^http/i,"ws")}/openai/realtime/audio?api-version=${encodeURIComponent(ver)}&deployment=${encodeURIComponent(dep)}`,
+    (ver, dep) => `${endpoint.replace(/^http/i,"ws")}/openai/realtime/audio?api-version=${encodeURIComponent(ver)}&deploymentId=${encodeURIComponent(dep)}`
+  ];
+
+  const results = [];
+  const tryOnce = (url) => new Promise((resolve) => {
+    const ws = new (require("ws"))(url, {
+      headers: { "api-key": apiKey, "OpenAI-Beta": "realtime=v1" }
     });
 
+    let settled = false;
+
     ws.on("open", () => {
-      console.log("✅ Connected successfully to GPT Realtime Audio!");
+      settled = true;
       ws.close();
-      if (!res.headersSent) res.send("✅ Realtime Audio WebSocket connection successful!");
+      resolve({ url, ok: true, note: "✅ connected" });
+    });
+
+    ws.on("unexpected-response", (_req, resObj) => {
+      settled = true;
+      resolve({ url, ok: false, http: resObj?.statusCode, note: `HTTP ${resObj?.statusCode}` });
+      try { ws.close(); } catch {}
     });
 
     ws.on("error", (e) => {
-      console.error("❌ Realtime WS error:", e);
-      if (!res.headersSent) res.status(502).send(String(e));
+      if (settled) return;
+      settled = true;
+      resolve({ url, ok: false, error: e.message || String(e) });
     });
 
-    // Safety: close after 7s if neither open nor error fires
     setTimeout(() => {
-      if (ws.readyState !== ws.CLOSED) {
+      if (!settled) {
+        settled = true;
         try { ws.terminate(); } catch {}
-        if (!res.headersSent) res.status(504).send("Timed out connecting to Realtime WS");
+        resolve({ url, ok: false, error: "timeout" });
       }
     }, 7000);
-  } catch (e) {
-    console.error("❌ Exception:", e);
-    if (!res.headersSent) res.status(500).send(String(e));
+  });
+
+  // Try all combos, stop if one works
+  for (const ver of apiVersions) {
+    for (const build of pathVariants) {
+      const url = build(ver, deployment);
+      // eslint-disable-next-line no-await-in-loop
+      const r = await tryOnce(url);
+      results.push(r);
+      if (r.ok) {
+        return res
+          .status(200)
+          .send(
+            `✅ SUCCESS\nUsing: ${url}\n\nKeep this URL format in your code.\n\nFull trace:\n` +
+            results.map(x => `- ${x.url} -> ${x.ok ? "OK" : (x.http ? `HTTP ${x.http}` : x.error)}`).join("\n")
+          );
+      }
+    }
   }
+
+  // none worked
+  return res
+    .status(502)
+    .send(
+      "❌ All attempts failed.\n\nTrace:\n" +
+      results.map(x => `- ${x.url} -> ${x.ok ? "OK" : (x.http ? `HTTP ${x.http}` : x.error)}`).join("\n")
+    );
 });
-
-// ============================================================
-// START SERVER
-// ============================================================
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 Listening on port ${PORT}`));
