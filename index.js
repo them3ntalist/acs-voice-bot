@@ -74,18 +74,6 @@ app.get("/env-check", (_req, res) => {
 // Connectivity smoke test for Azure OpenAI Realtime WS
 app.get("/test-realtime", async (_req, res) => {
   try {
-    const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
-    const apiVersion = process.env.AZURE_OPENAI_API_VERSION;
-    const deployment = process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT;
-
-    if (!endpoint || !apiVersion || !deployment) {
-      return res
-        .status(500)
-        .send("Missing one of: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REALTIME_DEPLOYMENT");
-    }
-
-    app.get("/test-realtime", async (_req, res) => {
-  try {
     const wsUrl = `wss://service-desk-voice-agent.openai.azure.com/openai/realtime/audio?api-version=2025-08-28&deployment=gpt-realtime`;
 
     const ws = new (await import("ws")).default(wsUrl, {
@@ -94,6 +82,22 @@ app.get("/test-realtime", async (_req, res) => {
         "OpenAI-Beta": "realtime=v1"
       }
     });
+
+    ws.on("open", () => {
+      console.log("✅ Connected successfully to GPT Realtime Audio!");
+      ws.close();
+      res.send("✅ Realtime Audio WebSocket connection successful!");
+    });
+
+    ws.on("error", (e) => {
+      console.error("❌ Realtime WS error:", e);
+      if (!res.headersSent) res.status(500).send(String(e));
+    });
+  } catch (e) {
+    console.error("❌ Exception:", e);
+    if (!res.headersSent) res.status(500).send(String(e));
+  }
+});
 
     ws.on("open", () => {
       console.log("✅ Realtime Audio WS OK");
