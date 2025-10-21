@@ -1,3 +1,7 @@
+// ============================================================
+// Azure ACS Voice Bot + GPT Realtime Audio Connectivity Test
+// ============================================================
+
 const express = require("express");
 const { CallAutomationClient } = require("@azure/communication-call-automation");
 const WebSocket = require("ws");
@@ -7,38 +11,41 @@ app.use(express.json());
 
 // ---- CONFIG ----
 const SELF = process.env.SELF_BASE_URL || "https://YOUR-LINUX-APP.azurewebsites.net";
-const ACS_CONNECTION_STRING = process.env.ACS_CONNECTION_STRING;
-const ACS = ACS_CONNECTION_STRING ? new CallAutomationClient(ACS_CONNECTION_STRING) : null;
+const ACS = process.env.ACS_CONNECTION_STRING
+  ? new CallAutomationClient(process.env.ACS_CONNECTION_STRING)
+  : null;
 
-// ✅ Health check
+// Health check
 app.get("/", (_req, res) => res.send("OK"));
 
-// ✅ Event Grid / ACS webhook
+// Event Grid + ACS webhook
 app.post("/acs/inbound", async (req, res) => {
   const events = Array.isArray(req.body) ? req.body : [req.body];
 
   for (const ev of events) {
-    // 1️⃣ Subscription validation (handshake)
+    // 1️⃣ Event Grid handshake
     if (ev.eventType === "Microsoft.EventGrid.SubscriptionValidationEvent") {
       const code = ev?.data?.validationCode;
-      console.log("🔑 Event Grid handshake received:", code);
+      console.log("🔑 Handshake from Event Grid:", code);
       return res.status(200).json({ validationResponse: code });
     }
 
-    // 2️⃣ Incoming call event (from ACS)
+    // 2️⃣ Incoming call (from ACS)
     if (ev.eventType === "IncomingCall") {
-      console.log("📞 IncomingCall event:", JSON.stringify(ev.data));
+      console.log("📞 IncomingCall:", JSON.stringify(ev.data));
       if (!ACS) continue;
 
       try {
         const incomingCallContext = ev.data.incomingCallContext;
         const answer = await ACS.answerCall(incomingCallContext, {
-          callbackUri: `${SELF}/acs/inbound`
+          callbackUri: `${SELF}/acs/inbound`,
         });
         const callId = answer.callConnectionProperties.callConnectionId;
-        console.log("✅ Call answered successfully:", callId);
+        console.log("✅ Answered call:", callId);
+
+        // (GPT Realtime audio integration will be added later)
       } catch (e) {
-        console.error("❌ Error answering call:", e?.message || e);
+        console.error("❌ Error answering:", e?.message || e);
       }
     }
   }
@@ -46,37 +53,89 @@ app.post("/acs/inbound", async (req, res) => {
   res.sendStatus(200);
 });
 
-// ✅ Connectivity smoke test (GPT Realtime WebSocket)
+// ============================================================
+// GPT Realtime Audio Connectivity Test Section
+// ============================================================
+
+// Helper to convert https:// -> wss:// for WebSocket
+function wsBaseFromHttp(endpoint) {
+  return endpoint.replace(/^http/i, "ws");
+}
+
+// Check current env vars
+app.get("/env-check", (_req, res) => {
+  res.json({
+    AZURE_OPENAI_ENDPOINT: process.env.AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_VERSION: process.env.AZURE_OPENAI_API_VERSION,
+    AZURE_OPENAI_REALTIME_DEPLOYMENT: process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT,
+  });
+});
+
+// Connectivity smoke test for Azure OpenAI Realtime WS
 app.get("/test-realtime", async (_req, res) => {
   try {
-    const url =
-      `${process.env.AZURE_OPENAI_ENDPOINT}/openai/realtime` +
-      `?api-version=${encodeURIComponent(process.env.AZURE_OPENAI_API_VERSION)}` +
-      `&deployment=${encodeURIComponent(process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT)}`;
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION;
+    const deployment = process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT;
 
-    const ws = new WebSocket(url, {
-      headers: {
-        "api-key": process.env.AZURE_OPENAI_API_KEY,
-        "OpenAI-Beta": "realtime=v1"
-      }
-    });
+    if (!endpoint || !apiVersion || !deployment) {
+      return res
+        .status(500)
+        .send("Missing one of: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REALTIME_DEPLOYMENT");
+    }
 
-    ws.on("open", () => {
-      console.log("✅ Connected to GPT Realtime WebSocket");
-      ws.close();
-      res.send("✅ Realtime WS OK");
-    });
+    const wssBase = wsBaseFromHttp(endpoint);
 
-    ws.on("error", (e) => {
-      console.error("⚠️ Realtime WS error:", e);
-      if (!res.headersSent) res.status(500).send(String(e));
-    });
+    const tryUrl = (paramName) =>
+      `${wssBase}/openai/realtime?api-version=${encodeURIComponent(apiVersion)}&${paramName}=${encodeURIComponent(
+        deployment
+      )}`;
+
+    let tried = [];
+    let result;
+    const attempt = (url) =>
+      new Promise((resolve) => {
+        tried.push(url);
+        const ws = new WebSocket(url, {
+          headers: {
+            "api-key": process.env.AZURE_OPENAI_API_KEY,
+            "OpenAI-Beta": "realtime=v1",
+          },
+        });
+
+        ws.on("open", () => {
+          console.log("✅ Realtime WS connected:", url);
+          ws.close();
+          resolve({ ok: true, url });
+        });
+
+        ws.on("error", (e) => {
+          console.warn("⚠️ Realtime WS error for", url, "=>", e?.message || e);
+          resolve({ ok: false, url, error: e?.message || String(e) });
+        });
+
+        setTimeout(() => resolve({ ok: false, url, error: "timeout" }), 5000);
+      });
+
+    result = await attempt(tryUrl("deployment"));
+    if (!result.ok) result = await attempt(tryUrl("deploymentId"));
+
+    if (result.ok) {
+      return res.send("✅ Realtime WS OK");
+    } else {
+      return res
+        .status(502)
+        .send(`❌ Failed to connect.\nTried:\n- ${tried.join("\n- ")}\nLast error: ${result.error}`);
+    }
   } catch (e) {
     console.error("💥 Error in /test-realtime:", e);
     if (!res.headersSent) res.status(500).send(String(e));
   }
 });
 
-// ✅ Start server
+// ============================================================
+// START SERVER
+// ============================================================
+
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Listening on port ${PORT}`));
