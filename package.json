@@ -12,5 +12,7 @@
     "body-parser": "^1.20.2",
     "axios": "^1.6.7"
     "ws": "^8.14.2"
-  }
+  },
+  "type": "module",
+  "scripts": { "start": "node index.js" }
 }
