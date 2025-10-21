@@ -23,14 +23,14 @@ app.post("/acs/inbound", async (req, res) => {
   const events = Array.isArray(req.body) ? req.body : [req.body];
 
   for (const ev of events) {
-    // 1️⃣ Event Grid handshake
+    // 1) Event Grid handshake
     if (ev.eventType === "Microsoft.EventGrid.SubscriptionValidationEvent") {
       const code = ev?.data?.validationCode;
       console.log("🔑 Handshake from Event Grid:", code);
       return res.status(200).json({ validationResponse: code });
     }
 
-    // 2️⃣ Incoming call (from ACS)
+    // 2) Incoming call (from ACS)
     if (ev.eventType === "IncomingCall") {
       console.log("📞 IncomingCall:", JSON.stringify(ev.data));
       if (!ACS) continue;
@@ -43,7 +43,7 @@ app.post("/acs/inbound", async (req, res) => {
         const callId = answer.callConnectionProperties.callConnectionId;
         console.log("✅ Answered call:", callId);
 
-        // (GPT Realtime audio integration will be added later)
+        // (GPT Realtime audio integration to be added later.)
       } catch (e) {
         console.error("❌ Error answering:", e?.message || e);
       }
@@ -59,10 +59,10 @@ app.post("/acs/inbound", async (req, res) => {
 
 // Helper to convert https:// -> wss:// for WebSocket
 function wsBaseFromHttp(endpoint) {
-  return endpoint.replace(/^http/i, "ws");
+  return (endpoint || "").replace(/^http/i, "ws").replace(/\/+$/, "");
 }
 
-// Check current env vars
+// Check current env vars (safe subset)
 app.get("/env-check", (_req, res) => {
   res.json({
     AZURE_OPENAI_ENDPOINT: process.env.AZURE_OPENAI_ENDPOINT,
@@ -71,88 +71,54 @@ app.get("/env-check", (_req, res) => {
   });
 });
 
-// Connectivity smoke test for Azure OpenAI Realtime WS
+// Connectivity smoke test for Azure OpenAI Realtime Audio WS
 app.get("/test-realtime", async (_req, res) => {
   try {
-    const wsUrl = `wss://service-desk-voice-agent.openai.azure.com/openai/realtime/audio?api-version=2025-08-28&deployment=gpt-realtime`;
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT;            // e.g. https://service-desk-voice-agent.openai.azure.com/
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION;       // e.g. 2025-08-28
+    const deployment = process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT; // e.g. gpt-realtime
+    const apiKey = process.env.AZURE_OPENAI_API_KEY;
 
-    const ws = new (await import("ws")).default(wsUrl, {
+    if (!endpoint || !apiVersion || !deployment) {
+      return res.status(500).send(
+        "Missing one of: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REALTIME_DEPLOYMENT"
+      );
+    }
+    if (!apiKey) {
+      return res.status(500).send("Missing AZURE_OPENAI_API_KEY");
+    }
+
+    const wssBase = wsBaseFromHttp(endpoint);
+    // NOTE: `/audio` is required for Realtime **Audio**
+    const wsUrl = `${wssBase}/openai/realtime/audio?api-version=${encodeURIComponent(apiVersion)}&deployment=${encodeURIComponent(deployment)}`;
+
+    const ws = new WebSocket(wsUrl, {
       headers: {
-        "api-key": process.env.AZURE_OPENAI_API_KEY,
-        "OpenAI-Beta": "realtime=v1"
-      }
+        "api-key": apiKey,
+        "OpenAI-Beta": "realtime=v1",
+      },
     });
 
     ws.on("open", () => {
       console.log("✅ Connected successfully to GPT Realtime Audio!");
       ws.close();
-      res.send("✅ Realtime Audio WebSocket connection successful!");
+      if (!res.headersSent) res.send("✅ Realtime Audio WebSocket connection successful!");
     });
 
     ws.on("error", (e) => {
       console.error("❌ Realtime WS error:", e);
-      if (!res.headersSent) res.status(500).send(String(e));
+      if (!res.headersSent) res.status(502).send(String(e));
     });
+
+    // Safety: close after 7s if neither open nor error fires
+    setTimeout(() => {
+      if (ws.readyState !== ws.CLOSED) {
+        try { ws.terminate(); } catch {}
+        if (!res.headersSent) res.status(504).send("Timed out connecting to Realtime WS");
+      }
+    }, 7000);
   } catch (e) {
     console.error("❌ Exception:", e);
-    if (!res.headersSent) res.status(500).send(String(e));
-  }
-});
-
-    ws.on("open", () => {
-      console.log("✅ Realtime Audio WS OK");
-      ws.close();
-      res.send("✅ Connected successfully to GPT Realtime Audio!");
-    });
-
-    ws.on("error", (e) => {
-      console.error("❌ Realtime WS error:", e);
-      if (!res.headersSent) res.status(500).send(String(e));
-    });
-  } catch (e) {
-    console.error("❌ Exception:", e);
-    if (!res.headersSent) res.status(500).send(String(e));
-  }
-});
-
-    let tried = [];
-    let result;
-    const attempt = (url) =>
-      new Promise((resolve) => {
-        tried.push(url);
-        const ws = new WebSocket(url, {
-          headers: {
-            "api-key": process.env.AZURE_OPENAI_API_KEY,
-            "OpenAI-Beta": "realtime=v1",
-          },
-        });
-
-        ws.on("open", () => {
-          console.log("✅ Realtime WS connected:", url);
-          ws.close();
-          resolve({ ok: true, url });
-        });
-
-        ws.on("error", (e) => {
-          console.warn("⚠️ Realtime WS error for", url, "=>", e?.message || e);
-          resolve({ ok: false, url, error: e?.message || String(e) });
-        });
-
-        setTimeout(() => resolve({ ok: false, url, error: "timeout" }), 5000);
-      });
-
-    result = await attempt(tryUrl("deployment"));
-    if (!result.ok) result = await attempt(tryUrl("deploymentId"));
-
-    if (result.ok) {
-      return res.send("✅ Realtime WS OK");
-    } else {
-      return res
-        .status(502)
-        .send(`❌ Failed to connect.\nTried:\n- ${tried.join("\n- ")}\nLast error: ${result.error}`);
-    }
-  } catch (e) {
-    console.error("💥 Error in /test-realtime:", e);
     if (!res.headersSent) res.status(500).send(String(e));
   }
 });
