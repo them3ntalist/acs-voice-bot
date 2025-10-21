@@ -84,12 +84,32 @@ app.get("/test-realtime", async (_req, res) => {
         .send("Missing one of: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REALTIME_DEPLOYMENT");
     }
 
-    const wssBase = wsBaseFromHttp(endpoint);
+    app.get("/test-realtime", async (_req, res) => {
+  try {
+    const wsUrl = `wss://service-desk-voice-agent.openai.azure.com/openai/realtime/audio?api-version=2025-08-28&deployment=gpt-realtime`;
 
-    const tryUrl = (paramName) =>
-      `${wssBase}/openai/realtime?api-version=${encodeURIComponent(apiVersion)}&${paramName}=${encodeURIComponent(
-        deployment
-      )}`;
+    const ws = new (await import("ws")).default(wsUrl, {
+      headers: {
+        "api-key": process.env.AZURE_OPENAI_API_KEY,
+        "OpenAI-Beta": "realtime=v1"
+      }
+    });
+
+    ws.on("open", () => {
+      console.log("✅ Realtime Audio WS OK");
+      ws.close();
+      res.send("✅ Connected successfully to GPT Realtime Audio!");
+    });
+
+    ws.on("error", (e) => {
+      console.error("❌ Realtime WS error:", e);
+      if (!res.headersSent) res.status(500).send(String(e));
+    });
+  } catch (e) {
+    console.error("❌ Exception:", e);
+    if (!res.headersSent) res.status(500).send(String(e));
+  }
+});
 
     let tried = [];
     let result;
